@@ -44,6 +44,7 @@
 #include <WebServer.h>
 #include <esp_wifi.h>
 #include <lwip/stats.h>
+#include <DNSServer.h>
 
 // -------------------------------------------------------------------------
 // Configuration Constants
@@ -56,6 +57,7 @@ const int   WEB_PORT = 80;
 // Global Objects
 // -------------------------------------------------------------------------
 WebServer server(WEB_PORT);
+DNSServer dnsServer;
 volatile uint32_t disconnect_count = 0;
 
 // -------------------------------------------------------------------------
@@ -568,7 +570,12 @@ void handleClients() {
  * @brief Handle 404 errors
  */
 void handleNotFound() {
-    server.send(404, "text/plain", "404: Not Found");
+    if (server.hostHeader() != WiFi.softAPIP().toString()) {
+        server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true);
+        server.send(302, "text/plain", "");
+    } else {
+        server.send(404, "text/plain", "404: Not Found");
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -603,6 +610,9 @@ void setup() {
         Serial.println("Failed!");
     }
 
+    // Start DNS Server for Captive Portal (redirects all domains to this IP)
+    dnsServer.start(53, "*", WiFi.softAPIP());
+
     // Setup Web Server Routes
     server.on("/", HTTP_GET, handleRoot);
     server.on("/api/status", HTTP_GET, handleStatus);
@@ -619,6 +629,9 @@ void setup() {
 }
 
 void loop() {
+    // Process DNS requests
+    dnsServer.processNextRequest();
+
     // Handle incoming client requests
     server.handleClient();
     
