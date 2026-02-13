@@ -40,9 +40,17 @@
  */
 
 #include <Arduino.h>
+#ifdef ESP32
 #include <WiFi.h>
 #include <WebServer.h>
 #include <esp_wifi.h>
+#else
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+extern "C" {
+#include "user_interface.h"
+}
+#endif
 #include <lwip/stats.h>
 #include <DNSServer.h>
 
@@ -56,7 +64,14 @@ const int   WEB_PORT = 80;
 // -------------------------------------------------------------------------
 // Global Objects
 // -------------------------------------------------------------------------
+#ifdef ESP32
 WebServer server(WEB_PORT);
+#else
+ESP8266WebServer server(WEB_PORT);
+// ESP8266 Event Handlers
+WiFiEventHandler stationDisconnectHandler;
+WiFiEventHandler softAPDisconnectHandler;
+#endif
 DNSServer dnsServer;
 volatile uint32_t disconnect_count = 0;
 
@@ -182,6 +197,48 @@ const char index_html[] PROGMEM = R"rawliteral(
         </div>
 
         <div class="card">
+            <h2>Hardware Details</h2>
+            <div class="grid">
+                <div class="stat-item">
+                    <span class="stat-label">Chip Model</span>
+                    <span class="stat-value" id="chip_model">Loading...</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Revision</span>
+                    <span class="stat-value" id="chip_rev">-</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Features</span>
+                    <span class="stat-value" id="features" style="font-size:0.8rem">-</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Cores</span>
+                    <span class="stat-value" id="cores">-</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Flash Size</span>
+                    <span class="stat-value" id="flash_size">-</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Total RAM</span>
+                    <span class="stat-value" id="ram_total">-</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">PSRAM</span>
+                    <span class="stat-value" id="psram_size">-</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">SDK Version</span>
+                    <span class="stat-value" id="sdk_ver" style="font-size:0.8rem">-</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Build Date</span>
+                    <span class="stat-value" id="fw_date" style="font-size:0.8rem">-</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
             <h2>Diagnostics</h2>
             <div class="grid">
                 <div class="stat-item">
@@ -236,6 +293,16 @@ const char index_html[] PROGMEM = R"rawliteral(
                     document.getElementById('cpu_freq').textContent = data.cpu_freq + ' MHz';
                     document.getElementById('tcprexmit').textContent = data.tcp_rexmit;
                     document.getElementById('disconnects').textContent = data.disconnects;
+                    
+                    document.getElementById('chip_model').textContent = data.chip_model;
+                    document.getElementById('chip_rev').textContent = 'v' + data.chip_rev;
+                    document.getElementById('features').textContent = data.features;
+                    document.getElementById('cores').textContent = data.cores;
+                    document.getElementById('flash_size').textContent = (data.flash_size / (1024*1024)).toFixed(2) + ' MB';
+                    document.getElementById('ram_total').textContent = data.ram_total > 0 ? (data.ram_total / 1024).toFixed(1) + ' KB' : 'N/A';
+                    document.getElementById('psram_size').textContent = data.psram_size > 0 ? (data.psram_size / (1024*1024)).toFixed(2) + ' MB' : 'None';
+                    document.getElementById('sdk_ver').textContent = data.sdk_ver;
+                    document.getElementById('fw_date').textContent = data.fw_date;
                 })
                 .catch(e => console.error('Status error:', e));
 
@@ -404,7 +471,8 @@ const char index_html[] PROGMEM = R"rawliteral(
 /**
  * @brief Convert WiFi encryption type to string
  */
-String translateEncryptionType(wifi_auth_mode_t encryptionType) {
+String translateEncryptionType(uint8_t encryptionType) {
+#ifdef ESP32
     switch (encryptionType) {
         case WIFI_AUTH_OPEN: return "Open";
         case WIFI_AUTH_WEP: return "WEP";
@@ -415,17 +483,32 @@ String translateEncryptionType(wifi_auth_mode_t encryptionType) {
         case WIFI_AUTH_WPA3_PSK: return "WPA3_PSK";
         default: return "Unknown";
     }
+#else
+    switch (encryptionType) {
+        case ENC_TYPE_NONE: return "Open";
+        case ENC_TYPE_WEP: return "WEP";
+        case ENC_TYPE_TKIP: return "WPA_PSK";
+        case ENC_TYPE_CCMP: return "WPA2_PSK";
+        case ENC_TYPE_AUTO: return "Auto";
+        default: return "Unknown";
+    }
+#endif
 }
 
 /**
  * @brief WiFi Event Handler
  * Tracks disconnections to monitor stability
  */
+#ifdef ESP32
 void onWiFiEvent(WiFiEvent_t event) {
     if (event == ARDUINO_EVENT_WIFI_AP_STADISCONNECTED || event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
         disconnect_count++;
     }
 }
+#else
+void onStationDisconnected(const WiFiEventStationModeDisconnected& evt) { disconnect_count++; }
+void onSoftAPDisconnected(const WiFiEventSoftAPModeStationDisconnected& evt) { disconnect_count++; }
+#endif
 
 // -------------------------------------------------------------------------
 // Request Handlers
@@ -443,15 +526,49 @@ void handleRoot() {
  * Returns JSON: { "ip": "...", "mac": "...", "uptime": 123 }
  */
 void handleStatus() {
-    int8_t power = 0;
-    esp_wifi_get_max_tx_power(&power);
     String json = "{";
     json += "\"ip\":\"" + WiFi.softAPIP().toString() + "\",";
     json += "\"mac\":\"" + WiFi.macAddress() + "\",";
     json += "\"uptime\":" + String(millis() / 1000) + ",";
     json += "\"heap\":" + String(ESP.getFreeHeap()) + ",";
+
+#ifdef ESP32
+    int8_t power = 0;
+    esp_wifi_get_max_tx_power(&power);
     json += "\"tx_power\":" + String(power * 0.25) + ",";
+#else
+    json += "\"tx_power\":0,";
+#endif
     json += "\"cpu_freq\":" + String(ESP.getCpuFreqMHz());
+
+#ifdef ESP32
+    esp_chip_info_t chip_info;
+    esp_chip_info(&chip_info);
+    String features = "";
+    if (chip_info.features & CHIP_FEATURE_EMB_FLASH) features += "EmbFlash, ";
+    if (chip_info.features & CHIP_FEATURE_WIFI_BGN) features += "WiFi-BGN, ";
+    if (chip_info.features & CHIP_FEATURE_BLE) features += "BLE, ";
+    if (chip_info.features & CHIP_FEATURE_BT) features += "BT, ";
+    if (chip_info.features & CHIP_FEATURE_EMB_PSRAM) features += "EmbPSRAM, ";
+    if (features.length() > 2) features = features.substring(0, features.length() - 2);
+
+    json += ",\"chip_model\":\"" + String(ESP.getChipModel()) + " (revision v" + String(chip_info.revision) + ")\"";
+    json += ",\"chip_rev\":" + String(chip_info.revision);
+    json += ",\"features\":\"" + features + "\"";
+    json += ",\"cores\":" + String(ESP.getChipCores());
+    json += ",\"ram_total\":" + String(ESP.getHeapSize());
+    json += ",\"psram_size\":" + String(ESP.getPsramSize());
+#else
+    json += ",\"chip_model\":\"ESP8266\"";
+    json += ",\"chip_rev\":0";
+    json += ",\"features\":\"WiFi\"";
+    json += ",\"cores\":1";
+    json += ",\"ram_total\":0";
+    json += ",\"psram_size\":0";
+#endif
+    json += ",\"flash_size\":" + String(ESP.getFlashChipSize());
+    json += ",\"sdk_ver\":\"" + String(ESP.getSdkVersion()) + "\"";
+    json += ",\"fw_date\":\"" + String(__DATE__) + " " + String(__TIME__) + "\"";
     
     #if LWIP_STATS && LWIP_TCP
     json += ",\"tcp_rexmit\":" + String(lwip_stats.tcp.rexmit);
@@ -544,6 +661,7 @@ void handleUpload() {
  * Returns JSON array of connected stations with RSSI.
  */
 void handleClients() {
+#ifdef ESP32
     wifi_sta_list_t wifi_sta_list;
     esp_wifi_ap_get_sta_list(&wifi_sta_list);
 
@@ -563,6 +681,24 @@ void handleClients() {
         json += "}";
     }
     json += "]";
+#else
+    struct station_info *stat_info = wifi_softap_get_station_info();
+    String json = "[";
+    while (stat_info != NULL) {
+        if (json.length() > 1) json += ",";
+        json += "{";
+        char macStr[18];
+        sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X", 
+                stat_info->bssid[0], stat_info->bssid[1], stat_info->bssid[2], 
+                stat_info->bssid[3], stat_info->bssid[4], stat_info->bssid[5]);
+        json += "\"mac\":\"" + String(macStr) + "\",";
+        json += "\"rssi\":0"; // RSSI not available in standard AP mode on ESP8266
+        json += "}";
+        stat_info = STAILQ_NEXT(stat_info, next);
+    }
+    wifi_softap_free_station_info();
+    json += "]";
+#endif
     server.send(200, "application/json", json);
 }
 
@@ -589,14 +725,23 @@ void setup() {
     Serial.println("\n\n--- ESP32 WiFi Tester Starting ---");
 
     // Register Event Handler
+#ifdef ESP32
     WiFi.onEvent(onWiFiEvent);
+#else
+    stationDisconnectHandler = WiFi.onStationModeDisconnected(onStationDisconnected);
+    softAPDisconnectHandler = WiFi.onSoftAPModeStationDisconnected(onSoftAPDisconnected);
+#endif
 
     // Set WiFi Mode to AP_STA (Access Point + Station)
     // Station mode is required for scanning to work properly while AP is active
     WiFi.mode(WIFI_AP_STA);
 
     // Disable WiFi Power Save Mode to maximize throughput
+#ifdef ESP32
     WiFi.setSleep(false);
+#else
+    WiFi.setSleepMode(WIFI_NONE_SLEEP);
+#endif
 
     // Configure Access Point
     Serial.print("Setting up Access Point... ");
